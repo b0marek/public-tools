@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Usage:
+kerbparse.py - wyciaga hashe Kerberoast (TGS-REP) z surowego outputu GetUserSPNs.py,
+dzieli je wg typu szyfrowania i generuje gotowe komendy hashcata.
+
+Uzycie:
     python3 kerbparse.py roast_raw.txt
     python3 kerbparse.py roast_raw.txt -o wyniki/ --csv
     python3 kerbparse.py roast_raw.txt --run --wordlist /usr/share/wordlists/rockyou.txt
@@ -86,6 +89,24 @@ def parse(text):
     return found
 
 
+def resolve_hashcat(spec):
+    """Zwraca absolutna sciezke do binarki hashcata albo None.
+
+    Obsluguje: nazwe z PATH, sciezke do pliku .exe oraz sciezke do katalogu
+    z hashcatem (wtedy sam dobiera hashcat.exe / hashcat.bin / hashcat).
+    """
+    if os.path.isdir(spec):
+        for name in ("hashcat.exe", "hashcat.bin", "hashcat"):
+            cand = os.path.join(spec, name)
+            if os.path.isfile(cand):
+                return os.path.abspath(cand)
+        return None
+    if os.path.isfile(spec):
+        return os.path.abspath(spec)
+    found = shutil.which(spec)
+    return os.path.abspath(found) if found else None
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Parser hashy Kerberoast z outputu GetUserSPNs.py"
@@ -98,8 +119,19 @@ def main():
     ap.add_argument("--run", action="store_true", help="odpal hashcata od razu")
     ap.add_argument("--wordlist", default="/usr/share/wordlists/rockyou.txt")
     ap.add_argument("--rules", help="sciezka do pliku regul, np. .../rules/best64.rule")
-    ap.add_argument("--hashcat", default="hashcat", help="binarka hashcata")
+    ap.add_argument("--hashcat", default="hashcat",
+                    help="binarka hashcata: nazwa z PATH, sciezka do .exe "
+                         "albo katalog, w ktorym lezy hashcat")
+    ap.add_argument("--no-cd", action="store_true",
+                    help="nie zmieniaj katalogu roboczego na folder hashcata")
     args = ap.parse_args()
+
+    # Sciezki musza byc absolutne - hashcata odpalamy z jego wlasnego katalogu,
+    # wiec wszystko relatywne rozjechaloby sie po zmianie cwd.
+    args.outdir = os.path.abspath(args.outdir)
+    args.wordlist = os.path.abspath(args.wordlist)
+    if args.rules:
+        args.rules = os.path.abspath(args.rules)
 
     text = sys.stdin.read() if args.infile == "-" else open(
         args.infile, encoding="utf-8", errors="replace").read()
@@ -163,22 +195,37 @@ def main():
     print("-" * 60)
 
     if args.run:
-        if not shutil.which(args.hashcat):
-            print(f"\n[-] Nie znalazlem '{args.hashcat}' w PATH.", file=sys.stderr)
+        binpath = resolve_hashcat(args.hashcat)
+        if not binpath:
+            print(f"\n[-] Nie znalazlem hashcata: {args.hashcat}", file=sys.stderr)
+            print("    Podaj pelna sciezke, np. --hashcat C:\\tools\\hashcat\\hashcat.exe",
+                  file=sys.stderr)
             return 1
         if not os.path.exists(args.wordlist):
             print(f"\n[-] Brak slownika: {args.wordlist}", file=sys.stderr)
-            print("    rockyou bywa spakowany: gunzip /usr/share/wordlists/rockyou.txt.gz",
-                  file=sys.stderr)
+            print("    Na Linuksie rockyou bywa spakowany:"
+                  " gunzip /usr/share/wordlists/rockyou.txt.gz", file=sys.stderr)
             return 1
+
+        # hashcat szuka OpenCL/, kernels/ i rules/ wzgledem biezacego katalogu,
+        # wiec odpalamy go z miejsca, w ktorym lezy binarka.
+        workdir = os.path.dirname(binpath) or None
+        if args.no_cd:
+            workdir = None
+        if workdir:
+            print(f"\n[*] Katalog roboczy hashcata: {workdir}")
+
         for cmd in cmds:
+            cmd = [binpath] + cmd[1:]
             print(f"\n[*] Uruchamiam: {' '.join(cmd)}\n")
-            # Kod 1 = wyczerpano slownik bez trafien, to nie blad.
-            rc = subprocess.call(cmd)
+            # Kod 1 = slownik wyczerpany bez trafien, to nie blad.
+            rc = subprocess.call(cmd, cwd=workdir)
             if rc not in (0, 1):
                 print(f"[!] hashcat zakonczyl sie kodem {rc}", file=sys.stderr)
         if os.path.exists(pot):
             print(f"\n[+] Zlamane hasla: {pot}")
+        else:
+            print("\n[*] Brak trafien - zadne haslo nie zostalo zlamane.")
 
     return 0
 
