@@ -11,6 +11,7 @@ Uzycie:
 """
 
 import argparse
+import codecs
 import csv
 import os
 import re
@@ -89,6 +90,33 @@ def parse(text):
     return found
 
 
+def read_text(path):
+    """Czyta plik odgadujac kodowanie.
+
+    PowerShell 5.1 przy przekierowaniu '>' zapisuje UTF-16LE, wiec plik ma
+    bajty zerowe miedzy znakami - czytany jako UTF-8 nie pasuje do zadnego
+    regexa, mimo ze w edytorze wyglada poprawnie.
+    """
+    data = sys.stdin.buffer.read() if path == "-" else open(path, "rb").read()
+
+    boms = [
+        (codecs.BOM_UTF32_LE, "utf-32-le"), (codecs.BOM_UTF32_BE, "utf-32-be"),
+        (codecs.BOM_UTF8, "utf-8-sig"),
+        (codecs.BOM_UTF16_LE, "utf-16-le"), (codecs.BOM_UTF16_BE, "utf-16-be"),
+    ]
+    for bom, enc in boms:
+        if data.startswith(bom):
+            return data.decode(enc, errors="replace"), enc
+
+    # Brak BOM - bajty zerowe zdradzaja UTF-16 zapisany bez naglowka.
+    if b"\x00" in data[:4000]:
+        head = data[:4000]
+        enc = "utf-16-le" if head[1::2].count(0) > head[0::2].count(0) else "utf-16-be"
+        return data.decode(enc, errors="replace"), enc + " (bez BOM)"
+
+    return data.decode("utf-8", errors="replace"), "utf-8"
+
+
 def resolve_hashcat(spec):
     """Zwraca absolutna sciezke do binarki hashcata albo None.
 
@@ -133,12 +161,25 @@ def main():
     if args.rules:
         args.rules = os.path.abspath(args.rules)
 
-    text = sys.stdin.read() if args.infile == "-" else open(
-        args.infile, encoding="utf-8", errors="replace").read()
+    text, enc = read_text(args.infile)
 
     entries = parse(text)
     if not entries:
         print("[-] Nie znalazlem zadnego hasha $krb5tgs$ w wejsciu.", file=sys.stderr)
+        print(f"    Wykryte kodowanie : {enc}", file=sys.stderr)
+        print(f"    Dlugosc tekstu    : {len(text)} znakow", file=sys.stderr)
+        clean = text.replace("\x00", "")
+        if "krb5tgs" in clean and "krb5tgs" not in text:
+            print("    [!] 'krb5tgs' jest w pliku, ale rozdzielony bajtami zerowymi"
+                  " - zle odgadniete kodowanie.", file=sys.stderr)
+        elif "krb5tgs" in text:
+            print("    [!] 'krb5tgs' wystepuje, ale nie pasuje do formatu"
+                  " - hash moze byc obciety.", file=sys.stderr)
+        else:
+            print("    [!] Ciag 'krb5tgs' w ogole nie wystepuje - to chyba nie ten plik"
+                  " albo GetUserSPNs uruchomiono bez -request.", file=sys.stderr)
+        preview = text[:160].replace("\x00", "\\0").replace("\n", " | ")
+        print(f"    Poczatek pliku    : {preview}", file=sys.stderr)
         return 1
 
     os.makedirs(args.outdir, exist_ok=True)
